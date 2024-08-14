@@ -13,6 +13,7 @@ import pandas as pd
 import aiosqlite
 from dotenv import load_dotenv
 from keep_alive import keep_alive
+import threading
 
 # Enable logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -385,7 +386,7 @@ async def help_command(update: Update, context: CallbackContext) -> None:
     )
     await update.message.reply_text(help_text)
 
-async def main() -> None:
+async def start_bot():
     # Ensure the data directory exists
     os.makedirs('/opt/render/project/src/data', exist_ok=True)
 
@@ -423,8 +424,20 @@ async def main() -> None:
     application.add_error_handler(error_handler)
 
     # Run the bot until the user presses Ctrl-C
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    await application.initialize()
+    await application.start()
+    await application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+def run_keep_alive():
+    keep_alive()
+
+def main():
+    # Start the keep_alive function in a separate thread
+    keep_alive_thread = threading.Thread(target=run_keep_alive)
+    keep_alive_thread.start()
+
+    # Run the bot in the main thread
+    asyncio.run(start_bot())
 
 if __name__ == '__main__':
-    keep_alive()
-    asyncio.run(main())
+    main()
