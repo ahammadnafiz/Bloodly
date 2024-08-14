@@ -11,6 +11,7 @@ from geopy.distance import geodesic
 import pandas as pd
 import aiosqlite
 from dotenv import load_dotenv
+from keep_alive import keep_alive
 
 # Enable logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -413,4 +414,5 @@ def main() -> None:
     # Run the bot until the user presses Ctrl-C
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-    main()
+keep_alive()
+main()
