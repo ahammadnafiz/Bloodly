@@ -3,6 +3,7 @@ import logging
 from datetime import datetime
 import re
 from typing import List, Tuple
+import asyncio
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ConversationHandler, CallbackContext
@@ -28,7 +29,7 @@ BLOOD_TYPES = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-']
 geolocator = Nominatim(user_agent="blood_donation_bot")
 
 # Database setup
-DB_PATH = 'blood_donation.db'
+DB_PATH = '/opt/render/project/src/data/blood_donation.db'
 
 async def setup_database():
     try:
@@ -189,7 +190,9 @@ async def profile(update: Update, context: CallbackContext) -> int:
     name = update.effective_user.full_name
     
     try:
+        logger.info(f"Attempting to connect to database at {DB_PATH}")
         async with aiosqlite.connect(DB_PATH) as db:
+            logger.info("Connected to database successfully")
             await db.execute("""
             INSERT OR REPLACE INTO donors 
             (user_id, name, blood_type, latitude, longitude, contact, last_donation) 
@@ -198,10 +201,13 @@ async def profile(update: Update, context: CallbackContext) -> int:
                   context.user_data['latitude'], context.user_data['longitude'], 
                   context.user_data['contact'], last_donation))
             await db.commit()
+            logger.info("Data inserted successfully")
         
         await update.message.reply_text('Thank you for registering as a donor! 🎉\n\nYour information has been saved successfully.')
     except Exception as e:
         logger.error(f"Database error: {e}")
+        logger.error(f"Error type: {type(e)}")
+        logger.error(f"Error args: {e.args}")
         await update.message.reply_text('An error occurred while saving your information. Please try again later.')
     
     return ConversationHandler.END
@@ -379,10 +385,15 @@ async def help_command(update: Update, context: CallbackContext) -> None:
     )
     await update.message.reply_text(help_text)
 
-def main() -> None:
+async def main() -> None:
+    # Ensure the data directory exists
+    os.makedirs('/opt/render/project/src/data', exist_ok=True)
+
+    # Set appropriate permissions
+    os.chmod('/opt/render/project/src/data', 0o777)
+
     # Set up the database before running the bot
-    import asyncio
-    asyncio.get_event_loop().run_until_complete(setup_database())
+    await setup_database()
     
     # Create the Application and pass it your bot's token.
     application = Application.builder().token(BOT_TOKEN).build()
@@ -414,5 +425,6 @@ def main() -> None:
     # Run the bot until the user presses Ctrl-C
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-keep_alive()
-main()
+if __name__ == '__main__':
+    keep_alive()
+    asyncio.run(main())
