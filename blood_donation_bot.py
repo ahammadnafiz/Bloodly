@@ -12,6 +12,7 @@ import pandas as pd
 import asyncpg
 from dotenv import load_dotenv
 from keep_alive import keep_alive
+import asyncio
 
 # Enable logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -319,7 +320,7 @@ async def show_profile(update: Update, context: CallbackContext) -> int:
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    
+
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
@@ -333,14 +334,16 @@ def main():
         },
         fallbacks=[CommandHandler('start', start)],
     )
-    
+
     app.add_handler(conv_handler)
-    
+
     logger.info("Starting bot...")
     keep_alive()  # Keep the bot running
-    app.run_polling()
+
+    # Run the bot with the correct event loop
+    asyncio.run(app.run_polling())
 
 if __name__ == '__main__':
-    import asyncio
-    asyncio.run(setup_database())  # Ensure database setup before starting the bot
+    # Ensure the database is set up in the current event loop
+    asyncio.run(setup_database())
     main()
