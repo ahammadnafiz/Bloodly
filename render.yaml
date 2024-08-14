@@ -7,7 +7,12 @@ services:
     envVars:
       - key: API
         sync: false
-    disk:
-      name: data
-      mountPath: /opt/render/project/src/data
-      sizeGB: 1
+      - key: DATABASE_URL
+        fromDatabase:
+          name: blood-donation-db
+          property: connectionString
+
+databases:
+  - name: blood-donation-db
+    databaseName: blood_donation
+    user: blood_donation_user

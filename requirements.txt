@@ -1,6 +1,6 @@
-flask
 python-telegram-bot
 geopy
 pandas
-aiosqlite
+asyncpg
 python-dotenv
+flask

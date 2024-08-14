@@ -3,24 +3,23 @@ import logging
 from datetime import datetime
 import re
 from typing import List, Tuple
-import asyncio
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ConversationHandler, CallbackContext
 from geopy.geocoders import Nominatim
-from geopy.distance import geodesic
+import asyncpg
 import pandas as pd
-import aiosqlite
 from dotenv import load_dotenv
 from keep_alive import keep_alive
-import threading
 
 # Enable logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Load environment variables
 load_dotenv('.env')
 BOT_TOKEN = os.getenv('API')
+DATABASE_URL = os.getenv('DATABASE_URL')
 
 # Define constants
 MENU, LOCATION, BLOOD_TYPE, CONTACT, PROFILE, FIND, EMERGENCY, LOCATION_FIND = range(8)
@@ -30,24 +29,22 @@ BLOOD_TYPES = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-']
 geolocator = Nominatim(user_agent="blood_donation_bot")
 
 # Database setup
-DB_PATH = '/opt/render/project/src/data/blood_donation.db'
-
 async def setup_database():
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-            CREATE TABLE IF NOT EXISTS donors (
-                id INTEGER PRIMARY KEY,
-                user_id INTEGER UNIQUE,
-                name TEXT NOT NULL,
-                blood_type TEXT NOT NULL,
-                latitude REAL NOT NULL,
-                longitude REAL NOT NULL,
-                contact TEXT NOT NULL,
-                last_donation TEXT
-            )
-            """)
-            await db.commit()
+        conn = await asyncpg.connect(DATABASE_URL)
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS donors (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT UNIQUE,
+            name TEXT NOT NULL,
+            blood_type TEXT NOT NULL,
+            latitude REAL NOT NULL,
+            longitude REAL NOT NULL,
+            contact TEXT NOT NULL,
+            last_donation TEXT
+        )
+        """)
+        await conn.close()
     except Exception as e:
         logger.error(f"Database setup error: {e}")
 
@@ -66,9 +63,9 @@ def parse_dms_coordinate(coord_str):
 
 async def start(update: Update, context: CallbackContext) -> int:
     user_id = update.effective_user.id
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("SELECT * FROM donors WHERE user_id = ?", (user_id,))
-        user_is_registered = await cursor.fetchone() is not None
+    conn = await asyncpg.connect(DATABASE_URL)
+    user_is_registered = await conn.fetchval("SELECT EXISTS(SELECT 1 FROM donors WHERE user_id = $1)", user_id)
+    await conn.close()
 
     keyboard = [
         [InlineKeyboardButton("Donate Blood 🩸", callback_data='donate'),
@@ -191,24 +188,20 @@ async def profile(update: Update, context: CallbackContext) -> int:
     name = update.effective_user.full_name
     
     try:
-        logger.info(f"Attempting to connect to database at {DB_PATH}")
-        async with aiosqlite.connect(DB_PATH) as db:
-            logger.info("Connected to database successfully")
-            await db.execute("""
-            INSERT OR REPLACE INTO donors 
-            (user_id, name, blood_type, latitude, longitude, contact, last_donation) 
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (user_id, name, context.user_data['blood_type'], 
-                  context.user_data['latitude'], context.user_data['longitude'], 
-                  context.user_data['contact'], last_donation))
-            await db.commit()
-            logger.info("Data inserted successfully")
+        conn = await asyncpg.connect(DATABASE_URL)
+        await conn.execute("""
+        INSERT INTO donors (user_id, name, blood_type, latitude, longitude, contact, last_donation)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (user_id) DO UPDATE
+        SET name = $2, blood_type = $3, latitude = $4, longitude = $5, contact = $6, last_donation = $7
+        """, user_id, name, context.user_data['blood_type'], 
+            context.user_data['latitude'], context.user_data['longitude'], 
+            context.user_data['contact'], last_donation)
+        await conn.close()
         
         await update.message.reply_text('Thank you for registering as a donor! 🎉\n\nYour information has been saved successfully.')
     except Exception as e:
         logger.error(f"Database error: {e}")
-        logger.error(f"Error type: {type(e)}")
-        logger.error(f"Error args: {e.args}")
         await update.message.reply_text('An error occurred while saving your information. Please try again later.')
     
     return ConversationHandler.END
@@ -217,34 +210,35 @@ async def find_nearest_donors(lat: float, lon: float, blood_type: str, limit: in
     logger.info(f"Finding nearest donors to location: ({lat}, {lon}) for blood type: {blood_type}")
 
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            # First, check if there are any donors with the exact blood type
-            query = "SELECT * FROM donors WHERE blood_type = ?"
-            params = [blood_type]
-            
-            async with db.execute(query, params) as cursor:
-                donors = await cursor.fetchall()
+        conn = await asyncpg.connect(DATABASE_URL)
+        query = """
+        SELECT blood_type, 
+               (6371 * acos(cos(radians($1)) * cos(radians(latitude)) * cos(radians(longitude) - radians($2)) + sin(radians($1)) * sin(radians(latitude)))) AS distance,
+               contact, latitude, longitude
+        FROM donors
+        WHERE blood_type = $3
+        ORDER BY distance
+        LIMIT $4
+        """
+        donors = await conn.fetch(query, lat, lon, blood_type, limit)
+        await conn.close()
 
-            if not donors:
-                # If no exact matches, find compatible blood types
-                compatible_types = get_compatible_blood_types(blood_type)
-                query = f"SELECT * FROM donors WHERE blood_type IN ({','.join(['?']*len(compatible_types))})"
-                params = compatible_types
-                
-                async with db.execute(query, params) as cursor:
-                    donors = await cursor.fetchall()
+        if not donors:
+            compatible_types = get_compatible_blood_types(blood_type)
+            query = """
+            SELECT blood_type, 
+                   (6371 * acos(cos(radians($1)) * cos(radians(latitude)) * cos(radians(longitude) - radians($2)) + sin(radians($1)) * sin(radians(latitude)))) AS distance,
+                   contact, latitude, longitude
+            FROM donors
+            WHERE blood_type = ANY($3::text[])
+            ORDER BY distance
+            LIMIT $4
+            """
+            conn = await asyncpg.connect(DATABASE_URL)
+            donors = await conn.fetch(query, lat, lon, compatible_types, limit)
+            await conn.close()
 
-            df = pd.DataFrame(donors, columns=['id', 'user_id', 'name', 'blood_type', 'latitude', 'longitude', 'contact', 'last_donation'])
-
-            df['latitude'] = pd.to_numeric(df['latitude'], errors='coerce')
-            df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
-            df = df.dropna(subset=['latitude', 'longitude'])
-
-            df['distance'] = df.apply(lambda row: geodesic((lat, lon), (row['latitude'], row['longitude'])).km, axis=1)
-            df_sorted = df.sort_values(by='distance')
-            nearest_donors = df_sorted.head(limit)
-
-            return [(row['blood_type'], row['distance'], row['contact'], row['latitude'], row['longitude']) for _, row in nearest_donors.iterrows()]
+        return [(donor['blood_type'], donor['distance'], donor['contact'], donor['latitude'], donor['longitude']) for donor in donors]
 
     except Exception as e:
         logger.error(f"Error while finding nearest donors: {e}")
@@ -337,16 +331,16 @@ async def show_profile(update: Update, context: CallbackContext) -> int:
     user_id = update.effective_user.id
     
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute("SELECT * FROM donors WHERE user_id = ?", (user_id,)) as cursor:
-                donor = await cursor.fetchone()
+        conn = await asyncpg.connect(DATABASE_URL)
+        donor = await conn.fetchrow("SELECT * FROM donors WHERE user_id = $1", user_id)
+        await conn.close()
         
         if donor:
             profile_text = f"📋 Your Donor Profile:\n\n"
-            profile_text += f"👤 Name: {donor[2]}\n"
-            profile_text += f"🩸 Blood Type: {donor[3]}\n"
-            profile_text += f"📞 Contact: {donor[6]}\n"
-            profile_text += f"📅 Last Donation: {donor[7] if donor[7] else 'Never'}\n"
+            profile_text += f"👤 Name: {donor['name']}\n"
+            profile_text += f"🩸 Blood Type: {donor['blood_type']}\n"
+            profile_text += f"📞 Contact: {donor['contact']}\n"
+            profile_text += f"📅 Last Donation: {donor['last_donation'] if donor['last_donation'] else 'Never'}\n"
             
             keyboard = [[InlineKeyboardButton("Update Profile", callback_data='update_profile')]]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -386,15 +380,10 @@ async def help_command(update: Update, context: CallbackContext) -> None:
     )
     await update.message.reply_text(help_text)
 
-async def start_bot():
-    # Ensure the data directory exists
-    os.makedirs('/opt/render/project/src/data', exist_ok=True)
-
-    # Set appropriate permissions
-    os.chmod('/opt/render/project/src/data', 0o777)
-
+def main() -> None:
     # Set up the database before running the bot
-    await setup_database()
+    import asyncio
+    asyncio.get_event_loop().run_until_complete(setup_database())
     
     # Create the Application and pass it your bot's token.
     application = Application.builder().token(BOT_TOKEN).build()
@@ -424,20 +413,7 @@ async def start_bot():
     application.add_error_handler(error_handler)
 
     # Run the bot until the user presses Ctrl-C
-    await application.initialize()
-    await application.start()
-    await application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-def run_keep_alive():
-    keep_alive()
-
-def main():
-    # Start the keep_alive function in a separate thread
-    keep_alive_thread = threading.Thread(target=run_keep_alive)
-    keep_alive_thread.start()
-
-    # Run the bot in the main thread
-    asyncio.run(start_bot())
-
-if __name__ == '__main__':
-    main()
+keep_alive()
+main()
