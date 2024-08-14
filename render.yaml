@@ -3,16 +3,7 @@ services:
     name: blood-donation-bot
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python your_script_name.py
+    startCommand: python blood_donation_bot.py
     envVars:
       - key: API
         sync: false
-      - key: DATABASE_URL
-        fromDatabase:
-          name: blood-donation-db
-          property: connectionString
-
-databases:
-  - name: blood-donation-db
-    databaseName: blood_donation
-    user: blood_donation_user
