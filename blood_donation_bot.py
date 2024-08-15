@@ -4,7 +4,7 @@ from datetime import datetime
 import re
 from typing import List, Tuple
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ConversationHandler, CallbackContext
 from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
@@ -75,16 +75,6 @@ async def start(update: Update, context: CallbackContext) -> int:
         cursor = await db.execute("SELECT * FROM donors WHERE user_id = ?", (user_id,))
         user_is_registered = await cursor.fetchone() is not None
 
-    welcome_message = (
-        "Welcome to the Bangladesh Blood Donation Bot! 🇧🇩🩸\n\n"
-        "This bot helps connect blood donors with those in need. "
-        "What would you like to do?\n\n"
-        "• To donate blood, click 'Donate Blood' or use /donate\n"
-        "• To find blood, click 'Find Blood' or use /find\n"
-        "• For emergencies, click 'Emergency Request' or use /emergency\n"
-        "• To see all available commands, use /help"
-    )
-
     keyboard = [
         [InlineKeyboardButton("Donate Blood 🩸", callback_data='donate'),
          InlineKeyboardButton("Find Blood 🔍", callback_data='find')],
@@ -92,30 +82,15 @@ async def start(update: Update, context: CallbackContext) -> int:
     ]
     if user_is_registered:
         keyboard.append([InlineKeyboardButton("My Profile 👤", callback_data='profile')])
-        welcome_message += "\n\nYou're already registered as a donor. You can view or update your profile using the 'My Profile' button or /profile command."
-    else:
-        welcome_message += "\n\nIf you haven't registered as a donor yet, you can do so by clicking 'Donate Blood' or using the /donate command."
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.message.reply_text(welcome_message, reply_markup=reply_markup)
-    return MENU
-
-async def donate_command(update: Update, context: CallbackContext) -> int:
-    await update.message.reply_text('Please share your location. You can send your current location, a Google Maps link, or type an address.')
-    return LOCATION
-
-async def find_command(update: Update, context: CallbackContext) -> int:
-    return await find_blood(update, context)
-
-async def emergency_command(update: Update, context: CallbackContext) -> int:
-    keyboard = [[InlineKeyboardButton(bt, callback_data=f'blood_{bt}') for bt in BLOOD_TYPES[i:i+2]] for i in range(0, len(BLOOD_TYPES), 2)]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text('What blood type do you need?', reply_markup=reply_markup)
-    return EMERGENCY
-
-async def profile_command(update: Update, context: CallbackContext) -> int:
-    await show_profile(update, context)
+    await update.message.reply_text(
+        'Welcome to the Bangladesh Blood Donation Bot! 🇧🇩\n\n'
+        'This bot helps connect blood donors with those in need. '
+        'What would you like to do?',
+        reply_markup=reply_markup
+    )
     return MENU
 
 async def menu_callback(update: Update, context: CallbackContext) -> int:
@@ -172,7 +147,6 @@ async def update_profile(update: Update, context: CallbackContext) -> int:
         await update.message.reply_text('Invalid choice. Please enter 1, 2, 3, 4, or 5.')
         return UPDATE_PROFILE
 
-# Add a new function to handle location updates
 async def update_location(update: Update, context: CallbackContext) -> int:
     user = update.message.from_user
     user_id = user.id
@@ -216,6 +190,7 @@ async def update_location(update: Update, context: CallbackContext) -> int:
 
     return ConversationHandler.END
 
+# New function to handle name updates
 async def update_name(update: Update, context: CallbackContext) -> int:
     new_name = update.message.text.strip()
     user_id = update.effective_user.id
@@ -392,43 +367,6 @@ async def profile(update: Update, context: CallbackContext) -> int:
 
     return ConversationHandler.END
 
-# async def find_nearest_donors(lat: float, lon: float, blood_type: str, limit: int = 5) -> List[Tuple]:
-#     logger.info(f"Finding nearest donors to location: ({lat}, {lon}) for blood type: {blood_type}")
-
-#     try:
-#         async with aiosqlite.connect(DB_PATH) as db:
-#             # First, check if there are any donors with the exact blood type
-#             query = "SELECT * FROM donors WHERE blood_type = ?"
-#             params = [blood_type]
-
-#             async with db.execute(query, params) as cursor:
-#                 donors = await cursor.fetchall()
-
-#             if not donors:
-#                 # If no exact matches, find compatible blood types
-#                 compatible_types = get_compatible_blood_types(blood_type)
-#                 query = f"SELECT * FROM donors WHERE blood_type IN ({','.join(['?']*len(compatible_types))})"
-#                 params = compatible_types
-
-#                 async with db.execute(query, params) as cursor:
-#                     donors = await cursor.fetchall()
-
-#             df = pd.DataFrame(donors, columns=['id', 'user_id', 'name', 'blood_type', 'latitude', 'longitude', 'contact', 'last_donation'])
-
-#             df['latitude'] = pd.to_numeric(df['latitude'], errors='coerce')
-#             df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
-#             df = df.dropna(subset=['latitude', 'longitude'])
-
-#             df['distance'] = df.apply(lambda row: geodesic((lat, lon), (row['latitude'], row['longitude'])).km, axis=1)
-#             df_sorted = df.sort_values(by='distance')
-#             nearest_donors = df_sorted.head(limit)
-
-#             return [(row['blood_type'], row['distance'], row['contact'], row['latitude'], row['longitude']) for _, row in nearest_donors.iterrows()]
-
-#     except Exception as e:
-#         logger.error(f"Error while finding nearest donors: {e}")
-#         return []
-
 async def find_nearest_donors(lat: float, lon: float, blood_type: str, limit: int = 5) -> List[Tuple]:
     logger.info(f"Finding nearest donors to location: ({lat}, {lon}) for blood type: {blood_type}")
 
@@ -461,19 +399,6 @@ async def find_nearest_donors(lat: float, lon: float, blood_type: str, limit: in
     except Exception as e:
         logger.error(f"Error while finding nearest donors: {e}")
         return []
-
-# def get_compatible_blood_types(blood_type: str) -> List[str]:
-#     compatibility = {
-#         'O-': ['O-'],
-#         'O+': ['O-', 'O+'],
-#         'A-': ['O-', 'A-'],
-#         'A+': ['O-', 'O+', 'A-', 'A+'],
-#         'B-': ['O-', 'B-'],
-#         'B+': ['O-', 'O+', 'B-', 'B+'],
-#         'AB-': ['O-', 'A-', 'B-', 'AB-'],
-#         'AB+': ['O-', 'O+', 'A-', 'A+', 'B-', 'B+', 'AB-', 'AB+']
-#     }
-#     return compatibility.get(blood_type.upper(), [])
 
 async def find_blood(update: Update, context: CallbackContext) -> int:
     keyboard = [[InlineKeyboardButton(bt, callback_data=f'find_{bt}') for bt in BLOOD_TYPES[i:i+2]] for i in range(0, len(BLOOD_TYPES), 2)]
@@ -523,7 +448,7 @@ async def handle_find_blood_location(update: Update, context: CallbackContext) -
     nearest_donors = await find_nearest_donors(latitude, longitude, blood_type=needed_blood_type, limit=5)
 
     if not nearest_donors:
-        await update.message.reply_text(f"No donors with blood type {needed_blood_type} in the area. Please try a wider search area.")
+        await update.message.reply_text(f"No donors with blood type {needed_blood_type} or compatible types found in the area. Please try a wider search area.")
     else:
         response = f"Nearest donors for blood type {needed_blood_type}:\n\n"
         for i, (blood_type, distance, contact, donor_lat, donor_lon) in enumerate(nearest_donors, 1):
@@ -545,7 +470,6 @@ async def emergency_callback(update: Update, context: CallbackContext) -> int:
     await query.message.reply_text('Please enter the location where you need blood (district, address, or Google Maps link).')
     return LOCATION_FIND
 
-# Update the show_profile function to include the option to update location
 async def show_profile(update: Update, context: CallbackContext) -> int:
     user_id = update.effective_user.id
 
@@ -560,7 +484,6 @@ async def show_profile(update: Update, context: CallbackContext) -> int:
             profile_text += f"🩸 Blood Type: {donor[3]}\n"
             profile_text += f"📞 Contact: {donor[6]}\n"
             profile_text += f"📅 Last Donation: {donor[7] if donor[7] else 'Never'}\n"
-            profile_text += f"📍 Location: https://www.google.com/maps?q={donor[4]},{donor[5]}\n"
 
             keyboard = [[InlineKeyboardButton("Update Profile", callback_data='update_profile')]]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -600,18 +523,6 @@ async def help_command(update: Update, context: CallbackContext) -> None:
     )
     await update.message.reply_text(help_text)
 
-async def set_commands(application: Application) -> None:
-    commands = [
-        BotCommand("start", "Start the bot and see the main menu"),
-        BotCommand("donate", "Register as a blood donor"),
-        BotCommand("find", "Find blood donors near you"),
-        BotCommand("emergency", "Make an emergency blood request"),
-        BotCommand("profile", "View or update your donor profile"),
-        BotCommand("help", "Get help and see available commands"),
-        BotCommand("cancel", "Cancel the current operation")
-    ]
-    await application.bot.set_my_commands(commands)
-
 def main() -> None:
     # Set up the database before running the bot
     import asyncio
@@ -620,35 +531,27 @@ def main() -> None:
     # Create the Application and pass it your bot's token.
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Set up the command menu
-    asyncio.get_event_loop().run_until_complete(set_commands(application))
-
+    # Add conversation handler with the states MENU, LOCATION, BLOOD_TYPE, CONTACT, PROFILE, FIND, EMERGENCY, LOCATION_FIND
     conv_handler = ConversationHandler(
-        entry_points=[
-            CommandHandler('start', start),
-            CommandHandler('donate', donate_command),
-            CommandHandler('find', find_command),
-            CommandHandler('emergency', emergency_command),
-            CommandHandler('profile', profile_command)
-        ],
-        states={
-            MENU: [CallbackQueryHandler(menu_callback)],
-            LOCATION: [MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, location)],
-            BLOOD_TYPE: [CallbackQueryHandler(blood_type_callback)],
-            CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, contact)],
-            PROFILE: [MessageHandler(filters.TEXT & ~filters.COMMAND, profile)],
-            FIND: [CallbackQueryHandler(blood_type_find_callback)],
-            LOCATION_FIND: [MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, handle_find_blood_location)],
-            EMERGENCY: [CallbackQueryHandler(emergency_callback)],
-            UPDATE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_name)],
-            UPDATE_PROFILE: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_profile)],
-            UPDATE_BLOOD_TYPE: [CallbackQueryHandler(update_blood_type_callback)],
-            UPDATE_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_contact)],
-            UPDATE_LAST_DONATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_last_donation)],
-            UPDATE_LOCATION: [MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, update_location)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)],
-    )
+    entry_points=[CommandHandler('start', start)],
+    states={
+        MENU: [CallbackQueryHandler(menu_callback)],
+        LOCATION: [MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, location)],
+        BLOOD_TYPE: [CallbackQueryHandler(blood_type_callback)],
+        CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, contact)],
+        PROFILE: [MessageHandler(filters.TEXT & ~filters.COMMAND, profile)],
+        FIND: [CallbackQueryHandler(blood_type_find_callback)],
+        LOCATION_FIND: [MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, handle_find_blood_location)],
+        EMERGENCY: [CallbackQueryHandler(emergency_callback)],
+        UPDATE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_name)],
+        UPDATE_PROFILE: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_profile)],
+        UPDATE_BLOOD_TYPE: [CallbackQueryHandler(update_blood_type_callback)],
+        UPDATE_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_contact)],
+        UPDATE_LAST_DONATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_last_donation)],
+        UPDATE_LOCATION: [MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, update_location)],
+    },
+    fallbacks=[CommandHandler('cancel', cancel)],
+)
 
     application.add_handler(conv_handler)
 
