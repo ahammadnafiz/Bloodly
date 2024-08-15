@@ -536,6 +536,24 @@ async def back_to_menu(update: Update, context: CallbackContext) -> int:
     )
     return MENU
 
+async def menu_command(update: Update, context: CallbackContext) -> int:
+    # Create the menu keyboard
+    keyboard = [
+        [InlineKeyboardButton("Donate Blood 🩸", callback_data='donate'),
+         InlineKeyboardButton("Find Blood 🔍", callback_data='find')],
+        [InlineKeyboardButton("Emergency Request 🚨", callback_data='emergency')],
+        [InlineKeyboardButton("My Profile 👤", callback_data='profile')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # Send a new message with the menu options
+    await update.message.reply_text(
+        'Welcome back to the main menu! What would you like to do?',
+        reply_markup=reply_markup
+    )
+
+    return MENU
+
 async def cancel(update: Update, context: CallbackContext) -> int:
     await update.message.reply_text('Operation cancelled.')
     return ConversationHandler.END
@@ -571,7 +589,7 @@ def main() -> None:
 
     # Add conversation handler with the updated states
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('start', start)],
+        entry_points=[CommandHandler('start', start), CommandHandler('menu', menu_command)],
         states={
             MENU: [CallbackQueryHandler(menu_callback)],
             LOCATION: [MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, location)],
@@ -589,13 +607,14 @@ def main() -> None:
             UPDATE_LAST_DONATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_last_donation)],
             UPDATE_LOCATION: [MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, update_location)],
         },
-        fallbacks=[CommandHandler('cancel', cancel)],
+        fallbacks=[CommandHandler('cancel', cancel), CommandHandler('menu', menu_command)],
     )
 
     application.add_handler(conv_handler)
 
     # Add standalone command handlers
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("menu", menu_command))
 
     # Add error handler
     application.add_error_handler(error_handler)
