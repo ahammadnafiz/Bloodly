@@ -1,8 +1,9 @@
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import re
 from typing import List, Tuple
+from collections import defaultdict
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ConversationHandler, CallbackContext
@@ -22,9 +23,25 @@ BOT_TOKEN = os.getenv('API')
 
 # Define constants
 MENU, LOCATION, BLOOD_TYPE, CONTACT, PROFILE, FIND, EMERGENCY, LOCATION_FIND, PROFILE_VIEW, UPDATE_PROFILE, UPDATE_NAME, UPDATE_BLOOD_TYPE, UPDATE_CONTACT, UPDATE_LAST_DONATION, UPDATE_LOCATION = range(15)
+RESULTS_PER_PAGE = 5
+RATE_LIMIT_PERIOD = timedelta(minutes=1)
+MAX_REQUESTS = 6
 
 BLOOD_TYPES = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-']
+# Blood type compatibility chart
+COMPATIBLE_BLOOD_TYPES = {
+    'A+': ['A+', 'A-', 'O+', 'O-'],
+    'A-': ['A-', 'O-'],
+    'B+': ['B+', 'B-', 'O+', 'O-'],
+    'B-': ['B-', 'O-'],
+    'AB+': ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'],
+    'AB-': ['A-', 'B-', 'AB-', 'O-'],
+    'O+': ['O+', 'O-'],
+    'O-': ['O-']
+}
 
+# Rate limiting
+rate_limit_dict = defaultdict(list)
 # Initialize the geolocator
 geolocator = Nominatim(user_agent="blood_donation_bot")
 
@@ -66,6 +83,20 @@ def parse_dms_coordinate(coord_str):
         return lat, lon
 
     return None
+
+def check_rate_limit(user_id: int) -> bool:
+    current_time = datetime.now()
+    user_requests = rate_limit_dict[user_id]
+    
+    # Remove old requests
+    user_requests = [time for time in user_requests if current_time - time < RATE_LIMIT_PERIOD]
+    
+    if len(user_requests) >= MAX_REQUESTS:
+        return False
+    
+    user_requests.append(current_time)
+    rate_limit_dict[user_id] = user_requests
+    return True
 
 async def start(update: Update, context: CallbackContext) -> int:
     user_id = update.effective_user.id
@@ -381,22 +412,35 @@ async def profile(update: Update, context: CallbackContext) -> int:
 
     return ConversationHandler.END
 
-async def find_nearest_donors(lat: float, lon: float, blood_type: str, limit: int = 5) -> List[Tuple]:
+async def find_nearest_donors(lat: float, lon: float, blood_type: str, page: int = 1, limit: int = RESULTS_PER_PAGE) -> Tuple[List[Tuple], int]:
     logger.info(f"Finding nearest donors to location: ({lat}, {lon}) for blood type: {blood_type}")
 
     try:
         async with aiosqlite.connect(DB_PATH) as db:
-            # Check if there are any donors with the exact blood type
+            # First, try to find exact blood type matches
             query = "SELECT * FROM donors WHERE blood_type = ?"
             params = [blood_type]
 
             async with db.execute(query, params) as cursor:
-                donors = await cursor.fetchall()
+                exact_donors = await cursor.fetchall()
 
-            # If no exact matches are found, return an empty list
+            # If no exact matches, find compatible blood types
+            if not exact_donors:
+                compatible_types = COMPATIBLE_BLOOD_TYPES[blood_type]
+                placeholders = ','.join('?' for _ in compatible_types)
+                query = f"SELECT * FROM donors WHERE blood_type IN ({placeholders})"
+                params = compatible_types
+
+                async with db.execute(query, params) as cursor:
+                    compatible_donors = await cursor.fetchall()
+
+                donors = compatible_donors
+            else:
+                donors = exact_donors
+
             if not donors:
-                logger.info(f"No donors found with blood type: {blood_type}")
-                return []
+                logger.info(f"No donors found with blood type: {blood_type} or compatible types")
+                return [], 0
 
             df = pd.DataFrame(donors, columns=['id', 'user_id', 'name', 'blood_type', 'latitude', 'longitude', 'contact', 'last_donation'])
 
@@ -406,13 +450,18 @@ async def find_nearest_donors(lat: float, lon: float, blood_type: str, limit: in
 
             df['distance'] = df.apply(lambda row: geodesic((lat, lon), (row['latitude'], row['longitude'])).km, axis=1)
             df_sorted = df.sort_values(by='distance')
-            nearest_donors = df_sorted.head(limit)
 
-            return [(row['blood_type'], row['distance'], row['contact'], row['latitude'], row['longitude']) for _, row in nearest_donors.iterrows()]
+            total_results = len(df_sorted)
+            start_index = (page - 1) * limit
+            end_index = start_index + limit
+
+            nearest_donors = df_sorted.iloc[start_index:end_index]
+
+            return [(row['blood_type'], row['distance'], row['contact'], row['latitude'], row['longitude']) for _, row in nearest_donors.iterrows()], total_results
 
     except Exception as e:
         logger.error(f"Error while finding nearest donors: {e}")
-        return []
+        return [], 0
 
 async def find_blood(update: Update, context: CallbackContext) -> int:
     keyboard = [[InlineKeyboardButton(bt, callback_data=f'find_{bt}') for bt in BLOOD_TYPES[i:i+2]] for i in range(0, len(BLOOD_TYPES), 2)]
@@ -430,6 +479,11 @@ async def blood_type_find_callback(update: Update, context: CallbackContext) -> 
     return LOCATION_FIND
 
 async def handle_find_blood_location(update: Update, context: CallbackContext) -> int:
+    user_id = update.effective_user.id
+    if not check_rate_limit(user_id):
+        await update.message.reply_text("You've reached the maximum number of requests. Please try again later.")
+        return ConversationHandler.END
+
     if update.message.location:
         latitude = update.message.location.latitude
         longitude = update.message.location.longitude
@@ -459,21 +513,68 @@ async def handle_find_blood_location(update: Update, context: CallbackContext) -
         return LOCATION_FIND
 
     needed_blood_type = context.user_data.get('needed_blood_type')
-    nearest_donors = await find_nearest_donors(latitude, longitude, blood_type=needed_blood_type, limit=5)
+    nearest_donors, total_results = await find_nearest_donors(latitude, longitude, blood_type=needed_blood_type, page=1)
 
     if not nearest_donors:
         await update.message.reply_text(f"No donors with blood type {needed_blood_type} or compatible types found in the area. Please try a wider search area.")
     else:
-        response = f"Nearest donors for blood type {needed_blood_type}:\n\n"
+        if nearest_donors[0][0] == needed_blood_type:
+            response = f"Found {total_results} donors with exact blood type match {needed_blood_type}:\n\n"
+        else:
+            response = f"No exact matches found. Showing {total_results} donors with compatible blood types for {needed_blood_type}:\n\n"
+
         for i, (blood_type, distance, contact, donor_lat, donor_lon) in enumerate(nearest_donors, 1):
             response += f"{i}. Blood Type: {blood_type}\n"
             response += f"   Distance: {distance:.2f} km\n"
             response += f"   Contact: {contact}\n"
             response += f"   Location: https://www.google.com/maps?q={donor_lat},{donor_lon}\n\n"
 
-        await update.message.reply_text(response)
+        if total_results > RESULTS_PER_PAGE:
+            keyboard = [
+                [InlineKeyboardButton("Next Page", callback_data=f"next_page_{2}_{latitude}_{longitude}_{needed_blood_type}")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(response, reply_markup=reply_markup)
+        else:
+            await update.message.reply_text(response)
 
     return ConversationHandler.END
+
+async def paginate_results(update: Update, context: CallbackContext) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    user_id = update.effective_user.id
+    if not check_rate_limit(user_id):
+        await query.message.reply_text("You've reached the maximum number of requests. Please try again later.")
+        return
+
+    _, page, lat, lon, blood_type = query.data.split('_')
+    page = int(page)
+    lat = float(lat)
+    lon = float(lon)
+
+    nearest_donors, total_results = await find_nearest_donors(lat, lon, blood_type=blood_type, page=page)
+
+    if not nearest_donors:
+        await query.message.reply_text("No more results found.")
+        return
+
+    response = f"Page {page} of donors for blood type {blood_type}:\n\n"
+    for i, (blood_type, distance, contact, donor_lat, donor_lon) in enumerate(nearest_donors, 1):
+        response += f"{i}. Blood Type: {blood_type}\n"
+        response += f"   Distance: {distance:.2f} km\n"
+        response += f"   Contact: {contact}\n"
+        response += f"   Location: https://www.google.com/maps?q={donor_lat},{donor_lon}\n\n"
+
+    keyboard = []
+    if page > 1:
+        keyboard.append(InlineKeyboardButton("Previous Page", callback_data=f"next_page_{page-1}_{lat}_{lon}_{blood_type}"))
+    if page * RESULTS_PER_PAGE < total_results:
+        keyboard.append(InlineKeyboardButton("Next Page", callback_data=f"next_page_{page+1}_{lat}_{lon}_{blood_type}"))
+
+    reply_markup = InlineKeyboardMarkup([keyboard])
+    await query.message.edit_text(response, reply_markup=reply_markup)
 
 async def emergency_callback(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
@@ -597,7 +698,7 @@ def main() -> None:
             CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, contact)],
             PROFILE: [MessageHandler(filters.TEXT & ~filters.COMMAND, profile)],
             FIND: [CallbackQueryHandler(blood_type_find_callback)],
-            LOCATION_FIND: [MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, handle_find_blood_location)],
+            LOCATION_FIND: [MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, handle_find_blood_location)],            
             EMERGENCY: [CallbackQueryHandler(emergency_callback)],
             PROFILE_VIEW: [CallbackQueryHandler(menu_callback)],
             UPDATE_PROFILE: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_profile)],
@@ -611,6 +712,7 @@ def main() -> None:
     )
 
     application.add_handler(conv_handler)
+    application.add_handler(CallbackQueryHandler(paginate_results, pattern=r'^next_page_'))
 
     # Add standalone command handlers
     application.add_handler(CommandHandler("help", help_command))
