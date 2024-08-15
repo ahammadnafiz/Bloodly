@@ -12,6 +12,7 @@ import pandas as pd
 import aiosqlite
 from dotenv import load_dotenv
 
+
 # Enable logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -20,10 +21,7 @@ load_dotenv('.env')
 BOT_TOKEN = os.getenv('API')
 
 # Define constants
-MENU, LOCATION, BLOOD_TYPE, CONTACT, PROFILE, FIND, EMERGENCY, LOCATION_FIND = range(8)
-
-# Add a new state for updating the profile
-UPDATE_PROFILE, UPDATE_NAME, UPDATE_BLOOD_TYPE, UPDATE_CONTACT, UPDATE_LAST_DONATION, UPDATE_LOCATION = range(8, 14)
+MENU, LOCATION, BLOOD_TYPE, CONTACT, PROFILE, FIND, EMERGENCY, LOCATION_FIND, PROFILE_VIEW, UPDATE_PROFILE, UPDATE_NAME, UPDATE_BLOOD_TYPE, UPDATE_CONTACT, UPDATE_LAST_DONATION, UPDATE_LOCATION = range(15)
 
 BLOOD_TYPES = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-']
 
@@ -75,6 +73,18 @@ async def start(update: Update, context: CallbackContext) -> int:
         cursor = await db.execute("SELECT * FROM donors WHERE user_id = ?", (user_id,))
         user_is_registered = await cursor.fetchone() is not None
 
+    # Send the intro text
+    await update.message.reply_text('''
+                                    🩸 Welcome to the Bangladesh Blood Donation Bot! 🇧🇩
+
+Greetings, lifesaver! You've just taken the first step towards making a real difference in your community. Our mission? To connect blood donors with those in need, swiftly and efficiently.
+ 
+For any help type /help
+
+Remember: Every drop counts. Your blood can be someone's lifeline.
+                                    ''')
+
+    # Then send the menu options as before
     keyboard = [
         [InlineKeyboardButton("Donate Blood 🩸", callback_data='donate'),
          InlineKeyboardButton("Find Blood 🔍", callback_data='find')],
@@ -86,8 +96,6 @@ async def start(update: Update, context: CallbackContext) -> int:
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
-        'Welcome to the Bangladesh Blood Donation Bot! 🇧🇩\n\n'
-        'This bot helps connect blood donors with those in need. '
         'What would you like to do?',
         reply_markup=reply_markup
     )
@@ -108,20 +116,26 @@ async def menu_callback(update: Update, context: CallbackContext) -> int:
         await query.message.reply_text('What blood type do you need?', reply_markup=reply_markup)
         return EMERGENCY
     elif query.data == 'profile':
-        await show_profile(update, context)
-        return MENU
+        return await show_profile(update, context)
     elif query.data == 'update_profile':
-        await query.message.reply_text('What would you like to update?\n\n'
-                                       '1. Name\n'
-                                       '2. Blood Type\n'
-                                       '3. Contact Number\n'
-                                       '4. Last Donation Date\n'
-                                       '5. Location\n\n'
-                                       'Please send the number corresponding to your choice.')
-        return UPDATE_PROFILE
+        return await update_profile_prompt(update, context)
+    elif query.data == 'back_to_menu':
+        return await back_to_menu(update, context)
     else:
         await query.message.reply_text('Invalid choice. Please select from the options provided.')
         return MENU
+
+async def update_profile_prompt(update: Update, context: CallbackContext) -> int:
+    update_text = ("What would you like to update?\n\n"
+                   "1. Name\n"
+                   "2. Blood Type\n"
+                   "3. Contact Number\n"
+                   "4. Last Donation Date\n"
+                   "5. Location\n\n"
+                   "Please send the number corresponding to your choice.")
+    
+    await update.callback_query.message.reply_text(update_text)
+    return UPDATE_PROFILE
 
 async def update_profile(update: Update, context: CallbackContext) -> int:
     choice = update.message.text.strip()
@@ -485,10 +499,16 @@ async def show_profile(update: Update, context: CallbackContext) -> int:
             profile_text += f"📞 Contact: {donor[6]}\n"
             profile_text += f"📅 Last Donation: {donor[7] if donor[7] else 'Never'}\n"
 
-            keyboard = [[InlineKeyboardButton("Update Profile", callback_data='update_profile')]]
+            keyboard = [
+                [InlineKeyboardButton("Update Profile", callback_data='update_profile')],
+                [InlineKeyboardButton("Back to Main Menu", callback_data='back_to_menu')]
+            ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            await update.callback_query.message.reply_text(profile_text, reply_markup=reply_markup)
+            if update.callback_query:
+                await update.callback_query.message.reply_text(profile_text, reply_markup=reply_markup)
+            else:
+                await update.message.reply_text(profile_text, reply_markup=reply_markup)
         else:
             await update.callback_query.message.reply_text("You haven't registered as a donor yet.")
 
@@ -496,7 +516,25 @@ async def show_profile(update: Update, context: CallbackContext) -> int:
         logger.error(f"Database error: {e}")
         await update.callback_query.message.reply_text("An error occurred while retrieving your profile. Please try again later.")
 
-    return ConversationHandler.END
+    return PROFILE_VIEW
+
+async def back_to_menu(update: Update, context: CallbackContext) -> int:
+    query = update.callback_query
+    await query.answer()
+
+    keyboard = [
+        [InlineKeyboardButton("Donate Blood 🩸", callback_data='donate'),
+         InlineKeyboardButton("Find Blood 🔍", callback_data='find')],
+        [InlineKeyboardButton("Emergency Request 🚨", callback_data='emergency')],
+        [InlineKeyboardButton("My Profile 👤", callback_data='profile')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.message.edit_text(
+        'Welcome back to the main menu! What would you like to do?',
+        reply_markup=reply_markup
+    )
+    return MENU
 
 async def cancel(update: Update, context: CallbackContext) -> int:
     await update.message.reply_text('Operation cancelled.')
@@ -531,27 +569,28 @@ def main() -> None:
     # Create the Application and pass it your bot's token.
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Add conversation handler with the states MENU, LOCATION, BLOOD_TYPE, CONTACT, PROFILE, FIND, EMERGENCY, LOCATION_FIND
+    # Add conversation handler with the updated states
     conv_handler = ConversationHandler(
-    entry_points=[CommandHandler('start', start)],
-    states={
-        MENU: [CallbackQueryHandler(menu_callback)],
-        LOCATION: [MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, location)],
-        BLOOD_TYPE: [CallbackQueryHandler(blood_type_callback)],
-        CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, contact)],
-        PROFILE: [MessageHandler(filters.TEXT & ~filters.COMMAND, profile)],
-        FIND: [CallbackQueryHandler(blood_type_find_callback)],
-        LOCATION_FIND: [MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, handle_find_blood_location)],
-        EMERGENCY: [CallbackQueryHandler(emergency_callback)],
-        UPDATE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_name)],
-        UPDATE_PROFILE: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_profile)],
-        UPDATE_BLOOD_TYPE: [CallbackQueryHandler(update_blood_type_callback)],
-        UPDATE_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_contact)],
-        UPDATE_LAST_DONATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_last_donation)],
-        UPDATE_LOCATION: [MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, update_location)],
-    },
-    fallbacks=[CommandHandler('cancel', cancel)],
-)
+        entry_points=[CommandHandler('start', start)],
+        states={
+            MENU: [CallbackQueryHandler(menu_callback)],
+            LOCATION: [MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, location)],
+            BLOOD_TYPE: [CallbackQueryHandler(blood_type_callback)],
+            CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, contact)],
+            PROFILE: [MessageHandler(filters.TEXT & ~filters.COMMAND, profile)],
+            FIND: [CallbackQueryHandler(blood_type_find_callback)],
+            LOCATION_FIND: [MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, handle_find_blood_location)],
+            EMERGENCY: [CallbackQueryHandler(emergency_callback)],
+            PROFILE_VIEW: [CallbackQueryHandler(menu_callback)],
+            UPDATE_PROFILE: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_profile)],
+            UPDATE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_name)],
+            UPDATE_BLOOD_TYPE: [CallbackQueryHandler(update_blood_type_callback)],
+            UPDATE_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_contact)],
+            UPDATE_LAST_DONATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_last_donation)],
+            UPDATE_LOCATION: [MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, update_location)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+    )
 
     application.add_handler(conv_handler)
 
