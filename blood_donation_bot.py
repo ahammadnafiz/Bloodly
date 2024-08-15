@@ -106,13 +106,25 @@ async def start(update: Update, context: CallbackContext) -> int:
 
     # Send the intro text
     await update.message.reply_text('''
-                                    🩸 Welcome to the Bangladesh Blood Donation Bot! 🇧🇩
+                                    🩸🇧🇩 Welcome to BloodHeroes Bangladesh! 🇧🇩🩸
 
-Greetings, lifesaver! You've just taken the first step towards making a real difference in your community. Our mission? To connect blood donors with those in need, swiftly and efficiently.
- 
-For any help type /help
+Assalamualaikum, future lifesaver! 🦸‍♀️🦸‍♂️
 
-Remember: Every drop counts. Your blood can be someone's lifeline.
+You've just taken the first heroic step towards becoming a real-life superhero. Your mission, should you choose to accept it, is to save lives with the power of your blood! 💪
+
+🚀 Quick Start Guide:
+• Type /menu to view all options
+• Type /help for assistance anytime
+
+Remember: Your blood type might be rare, but your kindness is legendary! One donation can save up to three lives. 😇
+
+Fun Fact: Did you know? The "lucky" blood type in Bangladesh is B+, shared by about 35% of the population!
+
+Ready to be someone's lifeline? Let's get started! Type /help to begin your heroic journey. 🎉
+
+Made with ❤️ by 💻 Ahammad Nafiz. Check out more cool projects at github.com/ahammadnafiz!
+
+#EveryDropCounts #BloodHeroesBangladesh
                                     ''')
 
     # Then send the menu options as before
@@ -666,17 +678,33 @@ async def error_handler(update: Update, context: CallbackContext) -> None:
 
 async def help_command(update: Update, context: CallbackContext) -> None:
     help_text = (
-        "Welcome to the Bangladesh Blood Donation Bot! 🇧🇩🩸\n\n"
-        "Here are the available commands:\n\n"
-        "/start - Start the bot and see the main menu\n"
-        "/help - Show this help message\n"
-        "/cancel - Cancel the current operation\n\n"
-        "Use the buttons to:\n"
-        "• Donate Blood 🩸\n"
-        "• Find Blood 🔍\n"
-        "• Make an Emergency Request 🚨\n"
-        "• View or Update Your Profile 👤 (if registered)\n\n"
-        "If you need further assistance, please don't hesitate to ask!"
+        '''
+        🩸🇧🇩 Welcome to BloodHeroes Bangladesh! 🦸‍♀️🦸‍♂️
+
+Ready to become a real-life superhero? Your adventure in saving lives starts here! 🚀
+
+🌟 Superhero Command Center:
+/start - Activate your hero powers! 💪
+/menu - View your superhero options 📋
+/help - Call for backup (show this message) 📞
+/cancel - Abort mission (cancel current operation) 🚫
+
+🦸 Choose Your Heroic Path:
+• Donate Blood 🩸 - Be the hero someone is waiting for!
+• Find Blood 🔍 - Lead the search for lifesaving matches!
+• Emergency Request 🚨 - Sound the alarm for urgent help!
+• Hero Profile 👤 - Power up your alter ego! (for registered heroes)
+
+Remember: Every drop counts, every hero matters! 💖
+
+Stuck on your mission? Don't worry! Your trusty sidekick (that's me!) is here to help. Just ask! 😊
+
+Type /menu to see all your superhero options! Let's save lives together! 🌈✨
+
+Made with ❤️ by 💻 Ahammad Nafiz. Check out more cool projects at github.com/ahammadnafiz!
+
+#BloodHeroesBangladesh #EveryDropCounts #BeAHero
+        '''
     )
     await update.message.reply_text(help_text)
 
