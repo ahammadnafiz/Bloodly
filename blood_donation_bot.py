@@ -5,7 +5,7 @@ import re
 from typing import List, Tuple
 from collections import defaultdict
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ConversationHandler, CallbackContext
 from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
@@ -22,10 +22,14 @@ load_dotenv('.env')
 BOT_TOKEN = os.getenv('API')
 
 # Define constants
-MENU, LOCATION, BLOOD_TYPE, CONTACT, PROFILE, FIND, EMERGENCY, LOCATION_FIND, PROFILE_VIEW, UPDATE_PROFILE, UPDATE_NAME, UPDATE_BLOOD_TYPE, UPDATE_CONTACT, UPDATE_LAST_DONATION, UPDATE_LOCATION = range(15)
+MENU, LOCATION, BLOOD_TYPE, CONTACT, PROFILE, FIND, LOCATION_FIND, PROFILE_VIEW, UPDATE_PROFILE, UPDATE_NAME, UPDATE_BLOOD_TYPE, UPDATE_CONTACT, UPDATE_LAST_DONATION, UPDATE_LOCATION, UPDATE_AVAILABILITY = range(15)
 RESULTS_PER_PAGE = 5
 RATE_LIMIT_PERIOD = timedelta(minutes=1)
 MAX_REQUESTS = 6
+
+REMINDER_RADIUS = 10  # km
+REMINDER_COOLDOWN = timedelta(hours=24)  # How often a donor can receive reminders
+
 
 BLOOD_TYPES = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-']
 # Blood type compatibility chart
@@ -51,6 +55,18 @@ DB_PATH = 'blood_donation.db'
 async def setup_database():
     try:
         async with aiosqlite.connect(DB_PATH) as db:
+            # Check if the 'available' column exists
+            async with db.execute("PRAGMA table_info(donors)") as cursor:
+                columns = await cursor.fetchall()
+                column_names = [column[1] for column in columns]
+            
+            if 'available' not in column_names:
+                # Add the 'available' column if it doesn't exist
+                await db.execute("ALTER TABLE donors ADD COLUMN available BOOLEAN NOT NULL DEFAULT TRUE")
+                await db.commit()
+                logger.info("Added 'available' column to donors table")
+            
+            # Ensure all other required columns exist
             await db.execute("""
             CREATE TABLE IF NOT EXISTS donors (
                 id INTEGER PRIMARY KEY,
@@ -60,7 +76,18 @@ async def setup_database():
                 latitude REAL NOT NULL,
                 longitude REAL NOT NULL,
                 contact TEXT NOT NULL,
-                last_donation TEXT
+                last_donation TEXT,
+                available BOOLEAN NOT NULL DEFAULT TRUE
+            )
+            """)
+            
+            # Create the donor_reminders table
+            await db.execute("""
+            CREATE TABLE IF NOT EXISTS donor_reminders (
+                id INTEGER PRIMARY KEY,
+                donor_id INTEGER,
+                last_reminded TIMESTAMP,
+                FOREIGN KEY (donor_id) REFERENCES donors (id)
             )
             """)
             await db.commit()
@@ -98,6 +125,37 @@ def check_rate_limit(user_id: int) -> bool:
     rate_limit_dict[user_id] = user_requests
     return True
 
+def is_within_radius(donor_lat, donor_lon, request_lat, request_lon, radius_km):
+    return geodesic((donor_lat, donor_lon), (request_lat, request_lon)).km <= radius_km
+
+async def send_reminders(bot: Bot, blood_type: str, latitude: float, longitude: float):
+    async with aiosqlite.connect(DB_PATH) as db:
+        query = """
+        SELECT d.id, d.user_id, d.blood_type, d.latitude, d.longitude, dr.last_reminded
+        FROM donors d
+        LEFT JOIN donor_reminders dr ON d.id = dr.donor_id
+        WHERE d.blood_type = ? AND d.available = TRUE
+        """
+        async with db.execute(query, (blood_type,)) as cursor:
+            donors = await cursor.fetchall()
+
+        now = datetime.now()
+        for donor in donors:
+            if is_within_radius(donor[3], donor[4], latitude, longitude, REMINDER_RADIUS):
+                if donor[5] is None or now - datetime.fromisoformat(donor[5]) > REMINDER_COOLDOWN:
+                    try:
+                        await bot.send_message(
+                            chat_id=donor[1],
+                            text=f"🚨 Blood Needed! 🚨\n\nSomeone in your area needs {blood_type} blood. If you're available to donate, please check the app for more details."
+                        )
+                        await db.execute(
+                            "INSERT OR REPLACE INTO donor_reminders (donor_id, last_reminded) VALUES (?, ?)",
+                            (donor[0], now.isoformat())
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to send reminder to donor {donor[1]}: {e}")
+        await db.commit()
+
 async def start(update: Update, context: CallbackContext) -> int:
     user_id = update.effective_user.id
     async with aiosqlite.connect(DB_PATH) as db:
@@ -131,7 +189,6 @@ Made with ❤️ by 💻 Ahammad Nafiz. Check out more cool projects at github.c
     keyboard = [
         [InlineKeyboardButton("Donate Blood 🩸", callback_data='donate'),
          InlineKeyboardButton("Find Blood 🔍", callback_data='find')],
-        [InlineKeyboardButton("Emergency Request 🚨", callback_data='emergency')]
     ]
     if user_is_registered:
         keyboard.append([InlineKeyboardButton("My Profile 👤", callback_data='profile')])
@@ -153,11 +210,6 @@ async def menu_callback(update: Update, context: CallbackContext) -> int:
         return LOCATION
     elif query.data == 'find':
         return await find_blood(update, context)
-    elif query.data == 'emergency':
-        keyboard = [[InlineKeyboardButton(bt, callback_data=f'blood_{bt}') for bt in BLOOD_TYPES[i:i+2]] for i in range(0, len(BLOOD_TYPES), 2)]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.message.reply_text('What blood type do you need?', reply_markup=reply_markup)
-        return EMERGENCY
     elif query.data == 'profile':
         return await show_profile(update, context)
     elif query.data == 'update_profile':
@@ -174,7 +226,8 @@ async def update_profile_prompt(update: Update, context: CallbackContext) -> int
                    "2. Blood Type\n"
                    "3. Contact Number\n"
                    "4. Last Donation Date\n"
-                   "5. Location\n\n"
+                   "5. Location\n"
+                   "6. Availability\n\n"
                    "Please send the number corresponding to your choice.")
     
     await update.callback_query.message.reply_text(update_text)
@@ -200,8 +253,11 @@ async def update_profile(update: Update, context: CallbackContext) -> int:
     elif choice == '5':
         await update.message.reply_text('Please share your new location. You can send your current location, a Google Maps link, or type an address.')
         return UPDATE_LOCATION
+    elif choice == '6':
+        await update.message.reply_text('Are you available to donate? Please type "Yes" or "No".')
+        return UPDATE_AVAILABILITY
     else:
-        await update.message.reply_text('Invalid choice. Please enter 1, 2, 3, 4, or 5.')
+        await update.message.reply_text('Invalid choice. Please enter 1, 2, 3, 4, 5, or 6.')
         return UPDATE_PROFILE
 
 async def update_location(update: Update, context: CallbackContext) -> int:
@@ -324,6 +380,26 @@ async def update_last_donation(update: Update, context: CallbackContext) -> int:
 
     return ConversationHandler.END
 
+async def update_availability(update: Update, context: CallbackContext) -> int:
+    response = update.message.text.strip().lower()
+    user_id = update.effective_user.id
+
+    if response in ['yes', 'no']:
+        new_availability = response == 'yes'
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("UPDATE donors SET available = ? WHERE user_id = ?", (new_availability, user_id))
+                await db.commit()
+            await update.message.reply_text(f'Your availability has been updated to {"Available" if new_availability else "Not Available"}.')
+        except Exception as e:
+            logger.error(f"Database error: {e}")
+            await update.message.reply_text('An error occurred while updating your availability. Please try again later.')
+    else:
+        await update.message.reply_text('Invalid input. Please type "Yes" or "No".')
+        return UPDATE_AVAILABILITY
+
+    return ConversationHandler.END
+
 async def location(update: Update, context: CallbackContext) -> int:
     user = update.message.from_user
 
@@ -410,14 +486,14 @@ async def profile(update: Update, context: CallbackContext) -> int:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
             INSERT OR REPLACE INTO donors
-            (user_id, name, blood_type, latitude, longitude, contact, last_donation)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            (user_id, name, blood_type, latitude, longitude, contact, last_donation, available)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (user_id, name, context.user_data['blood_type'],
                   context.user_data['latitude'], context.user_data['longitude'],
-                  context.user_data['contact'], last_donation))
+                  context.user_data['contact'], last_donation, True))
             await db.commit()
 
-        await update.message.reply_text('Thank you for registering as a donor! 🎉\n\nYour information has been saved successfully.')
+        await update.message.reply_text('Thank you for registering as a donor! 🎉\n\nYour information has been saved successfully. By default, your availability status is set to "Available".')
     except Exception as e:
         logger.error(f"Database error: {e}")
         await update.message.reply_text('An error occurred while saving your information. Please try again later.')
@@ -429,18 +505,30 @@ async def find_nearest_donors(lat: float, lon: float, blood_type: str, page: int
 
     try:
         async with aiosqlite.connect(DB_PATH) as db:
-            # First, try to find exact blood type matches
-            query = "SELECT * FROM donors WHERE blood_type = ?"
+            # Check if 'available' column exists
+            async with db.execute("PRAGMA table_info(donors)") as cursor:
+                columns = await cursor.fetchall()
+                column_names = [column[1] for column in columns]
+            
+            if 'available' in column_names:
+                query = "SELECT * FROM donors WHERE blood_type = ? AND available = TRUE"
+            else:
+                query = "SELECT * FROM donors WHERE blood_type = ?"
+            
             params = [blood_type]
 
             async with db.execute(query, params) as cursor:
                 exact_donors = await cursor.fetchall()
 
-            # If no exact matches, find compatible blood types
             if not exact_donors:
                 compatible_types = COMPATIBLE_BLOOD_TYPES[blood_type]
                 placeholders = ','.join('?' for _ in compatible_types)
-                query = f"SELECT * FROM donors WHERE blood_type IN ({placeholders})"
+                
+                if 'available' in column_names:
+                    query = f"SELECT * FROM donors WHERE blood_type IN ({placeholders}) AND available = TRUE"
+                else:
+                    query = f"SELECT * FROM donors WHERE blood_type IN ({placeholders})"
+                
                 params = compatible_types
 
                 async with db.execute(query, params) as cursor:
@@ -451,10 +539,14 @@ async def find_nearest_donors(lat: float, lon: float, blood_type: str, page: int
                 donors = exact_donors
 
             if not donors:
-                logger.info(f"No donors found with blood type: {blood_type} or compatible types")
+                logger.info(f"No available donors found with blood type: {blood_type} or compatible types")
                 return [], 0
 
-            df = pd.DataFrame(donors, columns=['id', 'user_id', 'name', 'blood_type', 'latitude', 'longitude', 'contact', 'last_donation'])
+            columns = ['id', 'user_id', 'name', 'blood_type', 'latitude', 'longitude', 'contact', 'last_donation']
+            if 'available' in column_names:
+                columns.append('available')
+            
+            df = pd.DataFrame(donors, columns=columns)
 
             df['latitude'] = pd.to_numeric(df['latitude'], errors='coerce')
             df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
@@ -550,6 +642,9 @@ async def handle_find_blood_location(update: Update, context: CallbackContext) -
         else:
             await update.message.reply_text(response)
 
+        # Send reminders to eligible donors
+        await send_reminders(context.bot, needed_blood_type, latitude, longitude)
+
     return ConversationHandler.END
 
 async def paginate_results(update: Update, context: CallbackContext) -> None:
@@ -611,6 +706,12 @@ async def show_profile(update: Update, context: CallbackContext) -> int:
             profile_text += f"🩸 Blood Type: {donor[3]}\n"
             profile_text += f"📞 Contact: {donor[6]}\n"
             profile_text += f"📅 Last Donation: {donor[7] if donor[7] else 'Never'}\n"
+            
+            # Check if 'available' field exists in the donor tuple
+            if len(donor) > 8:
+                profile_text += f"✅ Available: {'Yes' if donor[8] else 'No'}\n"
+            else:
+                profile_text += "✅ Available: Yes (Default)\n"
 
             keyboard = [
                 [InlineKeyboardButton("Update Profile", callback_data='update_profile')],
@@ -626,7 +727,7 @@ async def show_profile(update: Update, context: CallbackContext) -> int:
             await update.callback_query.message.reply_text("You haven't registered as a donor yet.")
 
     except Exception as e:
-        logger.error(f"Database error: {e}")
+        logger.error(f"Database error in show_profile: {e}")
         await update.callback_query.message.reply_text("An error occurred while retrieving your profile. Please try again later.")
 
     return PROFILE_VIEW
@@ -637,8 +738,7 @@ async def back_to_menu(update: Update, context: CallbackContext) -> int:
 
     keyboard = [
         [InlineKeyboardButton("Donate Blood 🩸", callback_data='donate'),
-         InlineKeyboardButton("Find Blood 🔍", callback_data='find')],
-        [InlineKeyboardButton("Emergency Request 🚨", callback_data='emergency')],
+        InlineKeyboardButton("Find Blood 🔍", callback_data='find')],
         [InlineKeyboardButton("My Profile 👤", callback_data='profile')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -653,8 +753,7 @@ async def menu_command(update: Update, context: CallbackContext) -> int:
     # Create the menu keyboard
     keyboard = [
         [InlineKeyboardButton("Donate Blood 🩸", callback_data='donate'),
-         InlineKeyboardButton("Find Blood 🔍", callback_data='find')],
-        [InlineKeyboardButton("Emergency Request 🚨", callback_data='emergency')],
+        InlineKeyboardButton("Find Blood 🔍", callback_data='find')],
         [InlineKeyboardButton("My Profile 👤", callback_data='profile')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -692,7 +791,6 @@ Ready to become a real-life superhero? Your adventure in saving lives starts her
 🦸 Choose Your Heroic Path:
 • Donate Blood 🩸 - Be the hero someone is waiting for!
 • Find Blood 🔍 - Lead the search for lifesaving matches!
-• Emergency Request 🚨 - Sound the alarm for urgent help!
 • Hero Profile 👤 - Power up your alter ego! (for registered heroes)
 
 Remember: Every drop counts, every hero matters! 💖
@@ -718,26 +816,25 @@ def main() -> None:
 
     # Add conversation handler with the updated states
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('start', start), CommandHandler('menu', menu_command)],
-        states={
-            MENU: [CallbackQueryHandler(menu_callback)],
-            LOCATION: [MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, location)],
-            BLOOD_TYPE: [CallbackQueryHandler(blood_type_callback)],
-            CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, contact)],
-            PROFILE: [MessageHandler(filters.TEXT & ~filters.COMMAND, profile)],
-            FIND: [CallbackQueryHandler(blood_type_find_callback)],
-            LOCATION_FIND: [MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, handle_find_blood_location)],            
-            EMERGENCY: [CallbackQueryHandler(emergency_callback)],
-            PROFILE_VIEW: [CallbackQueryHandler(menu_callback)],
-            UPDATE_PROFILE: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_profile)],
-            UPDATE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_name)],
-            UPDATE_BLOOD_TYPE: [CallbackQueryHandler(update_blood_type_callback)],
-            UPDATE_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_contact)],
-            UPDATE_LAST_DONATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_last_donation)],
-            UPDATE_LOCATION: [MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, update_location)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel), CommandHandler('menu', menu_command)],
-    )
+    entry_points=[CommandHandler('start', start), CommandHandler('menu', menu_command)],
+    states={
+        MENU: [CallbackQueryHandler(menu_callback)],
+        LOCATION: [MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, location)],
+        BLOOD_TYPE: [CallbackQueryHandler(blood_type_callback)],
+        CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, contact)],
+        UPDATE_PROFILE: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_profile)],
+        FIND: [CallbackQueryHandler(blood_type_find_callback)],
+        LOCATION_FIND: [MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, handle_find_blood_location)],
+        PROFILE_VIEW: [CallbackQueryHandler(menu_callback)],
+        UPDATE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_name)],
+        UPDATE_BLOOD_TYPE: [CallbackQueryHandler(update_blood_type_callback)],
+        UPDATE_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_contact)],
+        UPDATE_LAST_DONATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_last_donation)],
+        UPDATE_LOCATION: [MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, update_location)],
+        UPDATE_AVAILABILITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_availability)],
+    },
+    fallbacks=[CommandHandler('cancel', cancel), CommandHandler('menu', menu_command)],
+)
 
     application.add_handler(conv_handler)
     application.add_handler(CallbackQueryHandler(paginate_results, pattern=r'^next_page_'))
