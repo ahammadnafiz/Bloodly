@@ -13,7 +13,6 @@ import pandas as pd
 import aiosqlite
 from dotenv import load_dotenv
 
-
 # Enable logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -55,18 +54,7 @@ DB_PATH = 'blood_donation.db'
 async def setup_database():
     try:
         async with aiosqlite.connect(DB_PATH) as db:
-            # Check if the 'available' column exists
-            async with db.execute("PRAGMA table_info(donors)") as cursor:
-                columns = await cursor.fetchall()
-                column_names = [column[1] for column in columns]
-            
-            if 'available' not in column_names:
-                # Add the 'available' column if it doesn't exist
-                await db.execute("ALTER TABLE donors ADD COLUMN available BOOLEAN NOT NULL DEFAULT TRUE")
-                await db.commit()
-                logger.info("Added 'available' column to donors table")
-            
-            # Ensure all other required columns exist
+            # Ensure all required tables are created first
             await db.execute("""
             CREATE TABLE IF NOT EXISTS donors (
                 id INTEGER PRIMARY KEY,
@@ -81,7 +69,6 @@ async def setup_database():
             )
             """)
             
-            # Create the donor_reminders table
             await db.execute("""
             CREATE TABLE IF NOT EXISTS donor_reminders (
                 id INTEGER PRIMARY KEY,
@@ -91,6 +78,18 @@ async def setup_database():
             )
             """)
             await db.commit()
+            
+            # Check if the 'available' column exists
+            async with db.execute("PRAGMA table_info(donors)") as cursor:
+                columns = await cursor.fetchall()
+                column_names = [column[1] for column in columns]
+            
+            if 'available' not in column_names:
+                # Add the 'available' column if it doesn't exist
+                await db.execute("ALTER TABLE donors ADD COLUMN available BOOLEAN NOT NULL DEFAULT TRUE")
+                await db.commit()
+                logger.info("Added 'available' column to donors table")
+
     except Exception as e:
         logger.error(f"Database setup error: {e}")
 
@@ -459,10 +458,11 @@ async def blood_type_callback(update: Update, context: CallbackContext) -> int:
 async def contact(update: Update, context: CallbackContext) -> int:
     contact = update.message.text
 
+    # Validate Bangladeshi phone number format
     if re.match(r'^\+?880\d{10}$', contact):
         context.user_data['contact'] = contact
         await update.message.reply_text('When was your last blood donation? (YYYY-MM-DD or "Never")')
-        return PROFILE
+        return PROFILE  # Return PROFILE state instead of proceeding directly
     else:
         await update.message.reply_text('Invalid contact number. Please enter a valid Bangladesh phone number.')
         return CONTACT
@@ -822,6 +822,7 @@ def main() -> None:
         LOCATION: [MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, location)],
         BLOOD_TYPE: [CallbackQueryHandler(blood_type_callback)],
         CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, contact)],
+        PROFILE: [MessageHandler(filters.TEXT & ~filters.COMMAND, profile)],  # Add this line
         UPDATE_PROFILE: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_profile)],
         FIND: [CallbackQueryHandler(blood_type_find_callback)],
         LOCATION_FIND: [MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, handle_find_blood_location)],
