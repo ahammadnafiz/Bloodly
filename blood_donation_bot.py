@@ -1,13 +1,12 @@
 import os
-import time
 import logging
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta
 import re
 from typing import List, Tuple
 from collections import defaultdict
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ConversationHandler, CallbackContext, JobQueue
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ConversationHandler, CallbackContext
 from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
 import pandas as pd
@@ -69,7 +68,7 @@ async def setup_database():
                 available BOOLEAN NOT NULL DEFAULT TRUE
             )
             """)
-            
+
             await db.execute("""
             CREATE TABLE IF NOT EXISTS donor_reminders (
                 id INTEGER PRIMARY KEY,
@@ -79,12 +78,12 @@ async def setup_database():
             )
             """)
             await db.commit()
-            
+
             # Check if the 'available' column exists
             async with db.execute("PRAGMA table_info(donors)") as cursor:
                 columns = await cursor.fetchall()
                 column_names = [column[1] for column in columns]
-            
+
             if 'available' not in column_names:
                 # Add the 'available' column if it doesn't exist
                 await db.execute("ALTER TABLE donors ADD COLUMN available BOOLEAN NOT NULL DEFAULT TRUE")
@@ -114,13 +113,13 @@ def parse_dms_coordinate(coord_str):
 def check_rate_limit(user_id: int) -> bool:
     current_time = datetime.now()
     user_requests = rate_limit_dict[user_id]
-    
+
     # Remove old requests
     user_requests = [time for time in user_requests if current_time - time < RATE_LIMIT_PERIOD]
-    
+
     if len(user_requests) >= MAX_REQUESTS:
         return False
-    
+
     user_requests.append(current_time)
     rate_limit_dict[user_id] = user_requests
     return True
@@ -241,7 +240,7 @@ async def update_profile_prompt(update: Update, context: CallbackContext) -> int
                    "5. Location\n"
                    "6. Availability\n\n"
                    "Please send the number corresponding to your choice.")
-    
+
     await update.callback_query.message.reply_text(update_text)
     return UPDATE_PROFILE
 
@@ -527,11 +526,11 @@ async def profile(update: Update, context: CallbackContext) -> int:
 def is_eligible_to_donate(last_donation_str: str) -> bool:
     if last_donation_str is None or last_donation_str.lower() == 'never':
         return True
-    
+
     last_donation = datetime.fromisoformat(last_donation_str).date()
     today = datetime.now().date()
     min_days_between_donations = 56  # Typically 8 weeks between whole blood donations
-    
+
     return (today - last_donation).days >= min_days_between_donations
 
 async def find_nearest_donors(lat: float, lon: float, blood_type: str, page: int = 1, limit: int = RESULTS_PER_PAGE) -> Tuple[List[Tuple], int]:
@@ -543,21 +542,21 @@ async def find_nearest_donors(lat: float, lon: float, blood_type: str, page: int
             async with db.execute("PRAGMA table_info(donors)") as cursor:
                 columns = await cursor.fetchall()
                 column_names = [column[1] for column in columns]
-            
+
             if 'available' in column_names:
                 query = """
-                SELECT * FROM donors 
-                WHERE blood_type = ? 
-                AND available = TRUE 
+                SELECT * FROM donors
+                WHERE blood_type = ?
+                AND available = TRUE
                 AND (last_donation IS NULL OR date(last_donation) <= date('now', '-56 days'))
                 """
             else:
                 query = """
-                SELECT * FROM donors 
+                SELECT * FROM donors
                 WHERE blood_type = ?
                 AND (last_donation IS NULL OR date(last_donation) <= date('now', '-56 days'))
                 """
-            
+
             params = [blood_type]
 
             async with db.execute(query, params) as cursor:
@@ -566,12 +565,12 @@ async def find_nearest_donors(lat: float, lon: float, blood_type: str, page: int
             if not exact_donors:
                 compatible_types = COMPATIBLE_BLOOD_TYPES[blood_type]
                 placeholders = ','.join('?' for _ in compatible_types)
-                
+
                 if 'available' in column_names:
                     query = f"SELECT * FROM donors WHERE blood_type IN ({placeholders}) AND available = TRUE"
                 else:
                     query = f"SELECT * FROM donors WHERE blood_type IN ({placeholders})"
-                
+
                 params = compatible_types
 
                 async with db.execute(query, params) as cursor:
@@ -588,7 +587,7 @@ async def find_nearest_donors(lat: float, lon: float, blood_type: str, page: int
             columns = ['id', 'user_id', 'name', 'blood_type', 'latitude', 'longitude', 'contact', 'last_donation']
             if 'available' in column_names:
                 columns.append('available')
-            
+
             df = pd.DataFrame(donors, columns=columns)
 
             df['latitude'] = pd.to_numeric(df['latitude'], errors='coerce')
@@ -749,7 +748,7 @@ async def show_profile(update: Update, context: CallbackContext) -> int:
             profile_text += f"🩸 Blood Type: {donor[3]}\n"
             profile_text += f"📞 Contact: {donor[6]}\n"
             profile_text += f"📅 Last Donation: {donor[7] if donor[7] else 'Never'}\n"
-            
+
             # Check if 'available' field exists in the donor tuple
             if len(donor) > 8:
                 profile_text += f"✅ Available: {'Yes' if donor[8] else 'No'}\n"
@@ -849,7 +848,6 @@ Made with ❤️ by 💻 Ahammad Nafiz. Check out more cool projects at github.c
     await update.message.reply_text(help_text)
 
 def main() -> None:
-    import pytz
     # Set up the database before running the bot
     import asyncio
     asyncio.get_event_loop().run_until_complete(setup_database())
