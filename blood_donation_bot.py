@@ -21,14 +21,13 @@ load_dotenv('.env')
 BOT_TOKEN = os.getenv('API')
 
 # Define constants
-MENU, LOCATION, BLOOD_TYPE, CONTACT, PROFILE, FIND, LOCATION_FIND, PROFILE_VIEW, UPDATE_PROFILE, UPDATE_NAME, UPDATE_BLOOD_TYPE, UPDATE_CONTACT, UPDATE_LAST_DONATION, UPDATE_LOCATION, UPDATE_AVAILABILITY, EMERGENCY = range(16)
+MENU, LOCATION, BLOOD_TYPE, CONTACT, PROFILE, FIND, LOCATION_FIND, PROFILE_VIEW, UPDATE_PROFILE, UPDATE_NAME, UPDATE_BLOOD_TYPE, UPDATE_CONTACT, UPDATE_LAST_DONATION, UPDATE_LOCATION, UPDATE_AVAILABILITY, EMERGENCY, EMERGENCY_CONTACT, EMERGENCY_LOCATION = range(18)
 RESULTS_PER_PAGE = 5
 RATE_LIMIT_PERIOD = timedelta(minutes=1)
 MAX_REQUESTS = 6
 
 REMINDER_RADIUS = 10  # km
 REMINDER_COOLDOWN = timedelta(hours=1)  # How often a donor can receive reminders
-
 
 BLOOD_TYPES = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-']
 # Blood type compatibility chart
@@ -127,7 +126,7 @@ def check_rate_limit(user_id: int) -> bool:
 def is_within_radius(donor_lat, donor_lon, request_lat, request_lon, radius_km):
     return geodesic((donor_lat, donor_lon), (request_lat, request_lon)).km <= radius_km
 
-async def send_reminders(bot: Bot, blood_type: str, latitude: float, longitude: float, is_emergency: bool = False):
+async def send_reminders(bot: Bot, blood_type: str, latitude: float, longitude: float, requester_contact: str = None, is_emergency: bool = False):
     async with aiosqlite.connect(DB_PATH) as db:
         query = """
         SELECT d.id, d.user_id, d.blood_type, d.latitude, d.longitude
@@ -145,7 +144,8 @@ async def send_reminders(bot: Bot, blood_type: str, latitude: float, longitude: 
                         reminder_message = (
                             f"🚨 EMERGENCY: Blood Needed Urgently! 🚨\n\n"
                             f"Someone in your area needs {blood_type} blood IMMEDIATELY. This is an emergency situation.\n\n"
-                            f"📍 Location: [Click here](https://www.google.com/maps?q={latitude},{longitude})\n\n"
+                            f"📍 Location: [Click here](https://www.google.com/maps?q={latitude},{longitude})\n"
+                            f"📞 Requester Contact: {requester_contact}\n\n"
                             f"Please respond as soon as possible if you can help save a life today!"
                         )
                     else:
@@ -153,7 +153,7 @@ async def send_reminders(bot: Bot, blood_type: str, latitude: float, longitude: 
                             f"🩸 Blood Needed! 🩸\n\n"
                             f"Someone in your area needs {blood_type} blood. If you're available to donate, "
                             f"please check the app for more details.\n\n"
-                            f"📍 Location: [Click here](https://www.google.com/maps?q={latitude},{longitude})\n\n"
+                            f"📍 Location: [Click here](https://www.google.com/maps?q={latitude},{longitude})\n"
                         )
 
                     # Send the message with location link
@@ -174,7 +174,7 @@ async def start(update: Update, context: CallbackContext) -> int:
 
     # Send the intro text
     await update.message.reply_text('''
-                                    🩸🇧🇩 Welcome to BloodLY Bangladesh! 🇧🇩🩸
+                                    🩸🇧🇩 Welcome to BloodLY! 🇧🇩🩸
 
 Assalamualaikum, future lifesaver! 🦸‍♀️🦸‍♂️
 
@@ -185,8 +185,6 @@ You've just taken the first heroic step towards becoming a real-life superhero. 
 • Type /help for assistance anytime
 
 Remember: Your blood type might be rare, but your kindness is legendary! One donation can save up to three lives. 😇
-
-Fun Fact: Did you know? The "lucky" blood type in Bangladesh is B+, shared by about 35% of the population!
 
 Ready to be someone's lifeline? Let's get started! Type /help to begin your heroic journey. 🎉
 
@@ -245,8 +243,20 @@ async def emergency_blood_type_callback(update: Update, context: CallbackContext
 
     blood_type = query.data.split('_')[1]
     context.user_data['emergency_blood_type'] = blood_type
-    await query.message.reply_text('EMERGENCY: Please enter the location where you need blood urgently (district, address, or Google Maps link).')
-    return EMERGENCY  # Return EMERGENCY state instead of LOCATION_FIND
+    await query.message.reply_text('Please provide your contact number for this emergency request.')
+    return EMERGENCY_CONTACT
+
+async def emergency_contact(update: Update, context: CallbackContext) -> int:
+    contact = update.message.text
+
+    # Validate Bangladeshi phone number format
+    if re.match(r'^\+?880\d{10}$', contact):
+        context.user_data['emergency_contact'] = contact
+        await update.message.reply_text('Please enter the location where you need blood urgently (district, address, or Google Maps link).')
+        return EMERGENCY_LOCATION
+    else:
+        await update.message.reply_text('Invalid contact number. Please enter a valid Bangladesh phone number.')
+        return EMERGENCY_CONTACT
 
 async def handle_emergency_location(update: Update, context: CallbackContext) -> int:
     if update.callback_query:
@@ -289,6 +299,7 @@ async def handle_emergency_location(update: Update, context: CallbackContext) ->
         return LOCATION_FIND
 
     needed_blood_type = context.user_data.get('emergency_blood_type')
+    emergency_contact = context.user_data.get('emergency_contact')
     nearest_donors, total_results = await find_nearest_donors(latitude, longitude, blood_type=needed_blood_type, page=1)
 
     if not nearest_donors:
@@ -315,7 +326,7 @@ async def handle_emergency_location(update: Update, context: CallbackContext) ->
             await update.message.reply_text(response)
 
         # Send reminders to eligible donors for emergency requests
-        await send_reminders(context.bot, needed_blood_type, latitude, longitude, is_emergency=True)
+        await send_reminders(context.bot, needed_blood_type, latitude, longitude, emergency_contact, is_emergency=True)
 
     return ConversationHandler.END
 
@@ -402,7 +413,6 @@ async def update_location(update: Update, context: CallbackContext) -> int:
 
     return ConversationHandler.END
 
-# New function to handle name updates
 async def update_name(update: Update, context: CallbackContext) -> int:
     new_name = update.message.text.strip()
     user_id = update.effective_user.id
@@ -772,9 +782,6 @@ async def handle_find_blood_location(update: Update, context: CallbackContext) -
         else:
             await update.message.reply_text(response)
 
-        # Send reminders to eligible donors
-        # await send_reminders(context.bot, needed_blood_type, latitude, longitude)
-
     return ConversationHandler.END
 
 async def paginate_results(update: Update, context: CallbackContext) -> None:
@@ -964,10 +971,9 @@ def main() -> None:
         UPDATE_LAST_DONATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_last_donation)],
         UPDATE_LOCATION: [MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, update_location)],
         UPDATE_AVAILABILITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, update_availability)],
-        EMERGENCY: [
-            CallbackQueryHandler(emergency_blood_type_callback),
-            MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, handle_emergency_location)
-        ],
+        EMERGENCY: [CallbackQueryHandler(emergency_blood_type_callback)],
+        EMERGENCY_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, emergency_contact)],
+        EMERGENCY_LOCATION: [MessageHandler(filters.LOCATION | filters.TEXT & ~filters.COMMAND, handle_emergency_location)],
     },
     fallbacks=[CommandHandler('cancel', cancel), CommandHandler('menu', menu_command)],
 )
